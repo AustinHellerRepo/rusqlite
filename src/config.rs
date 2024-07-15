@@ -88,7 +88,7 @@ impl Connection {
     ///   output-for-trigger are not disabled or `true` if it is
     #[inline]
     pub fn db_config(&self, config: DbConfig) -> Result<bool> {
-        let c = self.db.borrow();
+        let c = self.db.read().unwrap();
         unsafe {
             let mut val = 0;
             check(ffi::sqlite3_db_config(
@@ -117,7 +117,7 @@ impl Connection {
     ///   programs, `true` to enable it
     #[inline]
     pub fn set_db_config(&self, config: DbConfig, new_val: bool) -> Result<bool> {
-        let c = self.db.borrow_mut();
+        let c = self.db.write().unwrap();
         unsafe {
             let mut val = 0;
             check(ffi::sqlite3_db_config(

@@ -56,7 +56,6 @@
 
 pub use libsqlite3_sys as ffi;
 
-use std::cell::RefCell;
 use std::default::Default;
 use std::ffi::{CStr, CString};
 use std::fmt;
@@ -65,7 +64,7 @@ use std::os::raw::{c_char, c_int};
 use std::path::Path;
 use std::result;
 use std::str;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::cache::StatementCache;
 use crate::inner_connection::InnerConnection;
@@ -375,7 +374,7 @@ impl DatabaseName<'_> {
 
 /// A connection to a SQLite database.
 pub struct Connection {
-    db: RefCell<InnerConnection>,
+    db: Arc<RwLock<InnerConnection>>,
     cache: StatementCache,
 }
 
@@ -471,7 +470,7 @@ impl Connection {
     pub fn open_with_flags<P: AsRef<Path>>(path: P, flags: OpenFlags) -> Result<Connection> {
         let c_path = path_to_cstring(path.as_ref())?;
         InnerConnection::open_with_flags(&c_path, flags, None).map(|db| Connection {
-            db: RefCell::new(db),
+            db: Arc::new(RwLock::new(db)),
             cache: StatementCache::with_capacity(STATEMENT_CACHE_DEFAULT_CAPACITY),
         })
     }
@@ -495,7 +494,7 @@ impl Connection {
         let c_path = path_to_cstring(path.as_ref())?;
         let c_vfs = str_to_cstring(vfs)?;
         InnerConnection::open_with_flags(&c_path, flags, Some(&c_vfs)).map(|db| Connection {
-            db: RefCell::new(db),
+            db: Arc::new(RwLock::new(db)),
             cache: StatementCache::with_capacity(STATEMENT_CACHE_DEFAULT_CAPACITY),
         })
     }
@@ -659,7 +658,7 @@ impl Connection {
     /// the hood.
     #[inline]
     pub fn last_insert_rowid(&self) -> i64 {
-        self.db.borrow_mut().last_insert_rowid()
+        self.db.write().unwrap().last_insert_rowid()
     }
 
     /// Convenience method to execute a query that is expected to return a
@@ -776,7 +775,7 @@ impl Connection {
     /// or if the underlying SQLite call fails.
     #[inline]
     pub fn prepare_with_flags(&self, sql: &str, flags: PrepFlags) -> Result<Statement<'_>> {
-        self.db.borrow_mut().prepare(self, sql, flags)
+        self.db.write().unwrap().prepare(self, sql, flags)
     }
 
     /// Close the SQLite connection.
@@ -791,7 +790,7 @@ impl Connection {
     #[inline]
     pub fn close(self) -> Result<(), (Connection, Error)> {
         self.flush_prepared_statement_cache();
-        let r = self.db.borrow_mut().close();
+        let r = self.db.write().unwrap().close();
         r.map_err(move |err| (self, err))
     }
 
@@ -932,7 +931,7 @@ impl Connection {
     /// safety of this `Connection`.
     #[inline]
     pub unsafe fn handle(&self) -> *mut ffi::sqlite3 {
-        self.db.borrow().db()
+        self.db.read().unwrap().db()
     }
 
     /// Create a `Connection` from a raw handle.
@@ -947,7 +946,7 @@ impl Connection {
     pub unsafe fn from_handle(db: *mut ffi::sqlite3) -> Result<Connection> {
         let db = InnerConnection::new(db, false);
         Ok(Connection {
-            db: RefCell::new(db),
+            db: Arc::new(RwLock::new(db)),
             cache: StatementCache::with_capacity(STATEMENT_CACHE_DEFAULT_CAPACITY),
         })
     }
@@ -995,7 +994,7 @@ impl Connection {
     pub unsafe fn from_handle_owned(db: *mut ffi::sqlite3) -> Result<Connection> {
         let db = InnerConnection::new(db, true);
         Ok(Connection {
-            db: RefCell::new(db),
+            db: Arc::new(RwLock::new(db)),
             cache: StatementCache::with_capacity(STATEMENT_CACHE_DEFAULT_CAPACITY),
         })
     }
@@ -1004,12 +1003,12 @@ impl Connection {
     /// queries from another thread.
     #[inline]
     pub fn get_interrupt_handle(&self) -> InterruptHandle {
-        self.db.borrow().get_interrupt_handle()
+        self.db.read().unwrap().get_interrupt_handle()
     }
 
     #[inline]
     fn decode_result(&self, code: c_int) -> Result<()> {
-        self.db.borrow().decode_result(code)
+        self.db.read().unwrap().decode_result(code)
     }
 
     /// Return the number of rows modified, inserted or deleted by the most
@@ -1019,7 +1018,7 @@ impl Connection {
     /// See <https://www.sqlite.org/c3ref/changes.html>
     #[inline]
     pub fn changes(&self) -> u64 {
-        self.db.borrow().changes()
+        self.db.read().unwrap().changes()
     }
 
     /// Return the total number of rows modified, inserted or deleted by all
@@ -1029,30 +1028,30 @@ impl Connection {
     /// See <https://www.sqlite.org/c3ref/total_changes.html>
     #[inline]
     pub fn total_changes(&self) -> u64 {
-        self.db.borrow().total_changes()
+        self.db.read().unwrap().total_changes()
     }
 
     /// Test for auto-commit mode.
     /// Autocommit mode is on by default.
     #[inline]
     pub fn is_autocommit(&self) -> bool {
-        self.db.borrow().is_autocommit()
+        self.db.read().unwrap().is_autocommit()
     }
 
     /// Determine if all associated prepared statements have been reset.
     #[inline]
     pub fn is_busy(&self) -> bool {
-        self.db.borrow().is_busy()
+        self.db.read().unwrap().is_busy()
     }
 
     /// Flush caches to disk mid-transaction
     pub fn cache_flush(&self) -> Result<()> {
-        self.db.borrow_mut().cache_flush()
+        self.db.write().unwrap().cache_flush()
     }
 
     /// Determine if a database is read-only
     pub fn is_readonly(&self, db_name: DatabaseName<'_>) -> Result<bool> {
-        self.db.borrow().db_readonly(db_name)
+        self.db.read().unwrap().db_readonly(db_name)
     }
 
     /// Return the schema name for a database connection
@@ -1449,7 +1448,7 @@ mod test {
             use std::os::raw::c_int;
             use std::ptr;
 
-            let raw_db = db.db.borrow_mut().db;
+            let raw_db = db.db.write().unwrap().db;
             let sql = "SELECT 1";
             let mut raw_stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
             let cstring = str_to_cstring(sql)?;

@@ -30,7 +30,7 @@ impl Connection {
             .and_then(|t| t.checked_add(timeout.subsec_millis().into()))
             .and_then(|t| t.try_into().ok())
             .expect("too big");
-        self.db.borrow_mut().busy_timeout(ms)
+        self.db.write().unwrap().busy_timeout(ms)
     }
 
     /// Register a callback to handle `SQLITE_BUSY` errors.
@@ -59,7 +59,7 @@ impl Connection {
             let handler_fn: fn(i32) -> bool = mem::transmute(p_arg);
             c_int::from(catch_unwind(|| handler_fn(count)).unwrap_or_default())
         }
-        let c = self.db.borrow_mut();
+        let c = self.db.write().unwrap();
         let r = match callback {
             Some(f) => unsafe {
                 ffi::sqlite3_busy_handler(c.db(), Some(busy_handler_callback), f as *mut c_void)
