@@ -5,7 +5,7 @@ use crate::{Connection, PrepFlags, Result, Statement};
 use hashlink::LruCache;
 use std::cell::RefCell;
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 impl Connection {
     /// Prepare a SQL statement for execution, returning a previously prepared
@@ -58,7 +58,7 @@ impl Connection {
 
 /// Prepared statements LRU cache.
 #[derive(Debug)]
-pub struct StatementCache(RefCell<LruCache<Arc<str>, RawStatement>>);
+pub struct StatementCache(Arc<RwLock<LruCache<Arc<str>, RawStatement>>>);
 
 #[allow(clippy::non_send_fields_in_send_ty)]
 unsafe impl Send for StatementCache {}
@@ -120,12 +120,12 @@ impl StatementCache {
     /// Create a statement cache.
     #[inline]
     pub fn with_capacity(capacity: usize) -> StatementCache {
-        StatementCache(RefCell::new(LruCache::new(capacity)))
+        StatementCache(Arc::new(RwLock::new(LruCache::new(capacity))))
     }
 
     #[inline]
     fn set_capacity(&self, capacity: usize) {
-        self.0.borrow_mut().set_capacity(capacity);
+        self.0.write().unwrap().set_capacity(capacity);
     }
 
     // Search the cache for a prepared-statement object that implements `sql`.
@@ -141,7 +141,7 @@ impl StatementCache {
         sql: &str,
     ) -> Result<CachedStatement<'conn>> {
         let trimmed = sql.trim();
-        let mut cache = self.0.borrow_mut();
+        let mut cache = self.0.write().unwrap();
         let stmt = match cache.remove(trimmed) {
             Some(raw_stmt) => Ok(Statement::new(conn, raw_stmt)),
             None => conn.prepare_with_flags(trimmed, PrepFlags::SQLITE_PREPARE_PERSISTENT),
@@ -157,7 +157,7 @@ impl StatementCache {
         if stmt.is_null() {
             return;
         }
-        let mut cache = self.0.borrow_mut();
+        let mut cache = self.0.write().unwrap();
         stmt.clear_bindings();
         if let Some(sql) = stmt.statement_cache_key() {
             cache.insert(sql, stmt);
@@ -171,7 +171,7 @@ impl StatementCache {
 
     #[inline]
     fn flush(&self) {
-        let mut cache = self.0.borrow_mut();
+        let mut cache = self.0.write().unwrap();
         cache.clear();
     }
 }
@@ -184,15 +184,15 @@ mod test {
 
     impl StatementCache {
         fn clear(&self) {
-            self.0.borrow_mut().clear();
+            self.0.write().unwrap().clear();
         }
 
         fn len(&self) -> usize {
-            self.0.borrow().len()
+            self.0.read().unwrap().len()
         }
 
         fn capacity(&self) -> usize {
-            self.0.borrow().capacity()
+            self.0.read().unwrap().capacity()
         }
     }
 
