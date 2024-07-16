@@ -227,6 +227,14 @@ impl Params for &[(&str, &dyn ToSql)] {
     }
 }
 
+impl Sealed for &[(&str, &(dyn ToSql + Send + Sync))] {}
+impl Params for &[(&str, &(dyn ToSql + Send + Sync))] {
+    #[inline]
+    fn __bind_in(self, stmt: &mut Statement<'_>) -> Result<()> {
+        stmt.bind_parameters_named(self)
+    }
+}
+
 // Manual impls for the empty and singleton tuple, although the rest are covered
 // by macros.
 impl Sealed for () {}
