@@ -622,6 +622,12 @@ impl Connection {
             .and_then(|mut stmt| stmt.check_no_tail().and_then(|()| stmt.execute(params)))
     }
 
+    /// Executes the SQL query with dynamically named parameters
+    pub fn execute_named_params<'a>(&self, sql: &str, named_params: Vec<(&'a str, &'a (dyn ToSql + 'a))>) -> Result<usize> {
+        self.prepare(sql)
+            .and_then(|mut stmt| stmt.check_no_tail().and_then(|()| stmt.execute_named_params(named_params)))
+    }
+
     /// Returns the path to the database file, if one exists and is known.
     ///
     /// Returns `Some("")` for a temporary or in-memory database.

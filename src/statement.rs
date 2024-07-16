@@ -114,8 +114,8 @@ impl Statement<'_> {
     }
 
     /// Executes query with user-supplied named params
-    pub fn execute_named_params<'a>(&mut self, params: Vec<(&'a str, &'a (dyn ToSql + 'a))>) -> Result<usize> {
-        self.bind_parameters_named(&params)?;
+    pub fn execute_named_params<'a>(&mut self, named_params: Vec<(&'a str, &'a (dyn ToSql + 'a))>) -> Result<usize> {
+        self.bind_parameters_named(&named_params)?;
         self.execute_with_bound_parameters()
     }
 
