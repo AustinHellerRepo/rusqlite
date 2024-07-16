@@ -113,6 +113,12 @@ impl Statement<'_> {
         self.execute_with_bound_parameters()
     }
 
+    /// Executes query with user-supplied named params
+    pub fn execute_named_params<'a>(&mut self, params: Vec<(&'a str, &'a (dyn ToSql + 'a))>) -> Result<usize> {
+        self.bind_parameters_named(&params)?;
+        self.execute_with_bound_parameters()
+    }
+
     /// Execute an INSERT and return the ROWID.
     ///
     /// # Note
