@@ -1,11 +1,14 @@
 use crate::types::FromSqlError;
 use crate::types::Type;
+use crate::IntoSqlitePointer;
 use crate::{errmsg_to_string, ffi, Result};
 use std::error;
 use std::fmt;
 use std::os::raw::c_int;
 use std::path::PathBuf;
 use std::str;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 /// Enum listing possible errors from rusqlite.
 #[derive(Debug)]
@@ -416,11 +419,11 @@ pub fn error_from_sqlite_code(code: c_int, message: Option<String>) -> Error {
 }
 
 #[cold]
-pub unsafe fn error_from_handle(db: *mut ffi::sqlite3, code: c_int) -> Error {
-    let message = if db.is_null() {
+pub unsafe fn error_from_handle(db: Arc<RwLock<Option<ffi::sqlite3>>>, code: c_int) -> Error {
+    let message = if db.read().unwrap().is_none() {
         None
     } else {
-        Some(errmsg_to_string(ffi::sqlite3_errmsg(db)))
+        Some(errmsg_to_string(ffi::sqlite3_errmsg(db.to_mut_sqlite_pointer())))
     };
     error_from_sqlite_code(code, message)
 }
@@ -428,7 +431,9 @@ pub unsafe fn error_from_handle(db: *mut ffi::sqlite3, code: c_int) -> Error {
 #[cold]
 #[cfg(not(feature = "modern_sqlite"))] // SQLite >= 3.38.0
 pub unsafe fn error_with_offset(db: *mut ffi::sqlite3, code: c_int, _sql: &str) -> Error {
-    error_from_handle(db, code)
+    use crate::FromSqlitePointer;
+
+    error_from_handle(db.from_mut_sqlite_pointer(), code)
 }
 
 #[cold]

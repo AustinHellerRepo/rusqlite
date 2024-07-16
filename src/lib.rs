@@ -266,6 +266,72 @@ macro_rules! prepare_cached_and_bind {
     }};
 }
 
+pub trait IntoSqlitePointer {
+    fn to_mut_sqlite_pointer(self) -> *mut ffi::sqlite3;
+}
+
+pub trait FromSqlitePointer {
+    fn from_mut_sqlite_pointer(self) -> Arc<RwLock<Option<ffi::sqlite3>>>;
+}
+
+pub trait TakeSqlitePointer {
+    fn take_mut_sqlite_pointer(&self) -> *mut ffi::sqlite3;
+}
+
+pub trait SetSqlitePointer {
+    fn set_mut_sqlite_pointer(&self, sqlite_instance: *mut ffi::sqlite3) -> ();
+}
+
+impl IntoSqlitePointer for Arc<RwLock<Option<ffi::sqlite3>>> {
+    fn to_mut_sqlite_pointer(self) -> *mut ffi::sqlite3 {
+        let mut sqlite_instance = Arc::try_unwrap(self)
+            .ok()
+            .unwrap()
+            .into_inner()
+            .unwrap();
+        if let Some(sqlite_instance) = sqlite_instance.take() {
+            Box::into_raw(Box::new(sqlite_instance))
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+}
+
+impl FromSqlitePointer for *mut ffi::sqlite3 {
+    fn from_mut_sqlite_pointer(self) -> Arc<RwLock<Option<libsqlite3_sys::sqlite3>>> {
+        unsafe {
+            let sqlite_instance: Option<ffi::sqlite3> = if self.is_null() {
+                None
+            } else {
+                Some(*Box::from_raw(self))
+            };
+            Arc::new(RwLock::new(sqlite_instance))
+        }
+    }
+}
+
+impl TakeSqlitePointer for Arc<RwLock<Option<ffi::sqlite3>>> {
+    fn take_mut_sqlite_pointer(&self) -> *mut libsqlite3_sys::sqlite3 {
+        let mut sqlite_instance = self.write()
+            .unwrap()
+            .take();
+        if let Some(sqlite_instance) = sqlite_instance.take() {
+            Box::into_raw(Box::new(sqlite_instance))
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+}
+
+impl SetSqlitePointer for Arc<RwLock<Option<ffi::sqlite3>>> {
+    fn set_mut_sqlite_pointer(&self, sqlite_instance: *mut ffi::sqlite3) -> () {
+        unsafe {
+            *self.write()
+                .unwrap() = Some(*Box::from_raw(sqlite_instance));
+        }
+    }
+}
+
 /// A typedef of the result returned by many methods.
 pub type Result<T, E = Error> = result::Result<T, E>;
 
@@ -931,7 +997,7 @@ impl Connection {
     /// safety of this `Connection`.
     #[inline]
     pub unsafe fn handle(&self) -> *mut ffi::sqlite3 {
-        self.db.read().unwrap().db()
+        self.db.read().unwrap().db().to_mut_sqlite_pointer()
     }
 
     /// Create a `Connection` from a raw handle.
@@ -944,7 +1010,7 @@ impl Connection {
     /// This function is unsafe because improper use may impact the Connection.
     #[inline]
     pub unsafe fn from_handle(db: *mut ffi::sqlite3) -> Result<Connection> {
-        let db = InnerConnection::new(db, false);
+        let db = InnerConnection::new(db.from_mut_sqlite_pointer(), false);
         Ok(Connection {
             db: Arc::new(RwLock::new(db)),
             cache: StatementCache::with_capacity(STATEMENT_CACHE_DEFAULT_CAPACITY),
@@ -992,18 +1058,11 @@ impl Connection {
     /// `ffi::sqlite3_open`().
     #[inline]
     pub unsafe fn from_handle_owned(db: *mut ffi::sqlite3) -> Result<Connection> {
-        let db = InnerConnection::new(db, true);
+        let db = InnerConnection::new(db.from_mut_sqlite_pointer(), true);
         Ok(Connection {
             db: Arc::new(RwLock::new(db)),
             cache: StatementCache::with_capacity(STATEMENT_CACHE_DEFAULT_CAPACITY),
         })
-    }
-
-    /// Get access to a handle that can be used to interrupt long running
-    /// queries from another thread.
-    #[inline]
-    pub fn get_interrupt_handle(&self) -> InterruptHandle {
-        self.db.read().unwrap().get_interrupt_handle()
     }
 
     #[inline]
@@ -1448,7 +1507,7 @@ mod test {
             use std::os::raw::c_int;
             use std::ptr;
 
-            let raw_db = db.db.write().unwrap().db;
+            let raw_db = db.db.write().unwrap().db.take_mut_sqlite_pointer();
             let sql = "SELECT 1";
             let mut raw_stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
             let cstring = str_to_cstring(sql)?;
@@ -1859,22 +1918,6 @@ mod test {
             Some(ErrorCode::OperationInterrupted)
         );
         Ok(())
-    }
-
-    #[test]
-    fn test_interrupt_close() {
-        let db = checked_memory_handle();
-        let handle = db.get_interrupt_handle();
-        handle.interrupt();
-        db.close().unwrap();
-        handle.interrupt();
-
-        // Look at it's internals to see if we cleared it out properly.
-        let db_guard = handle.db_lock.lock().unwrap();
-        assert!(db_guard.is_null());
-        // It would be nice to test that we properly handle close/interrupt
-        // running at the same time, but it seems impossible to do with any
-        // degree of reliability.
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::panic::catch_unwind;
 use std::ptr;
 use std::time::Duration;
 
-use crate::ffi;
+use crate::{ffi, FromSqlitePointer, IntoSqlitePointer, SetSqlitePointer, TakeSqlitePointer};
 use crate::{Connection, InnerConnection, Result};
 
 impl Connection {
@@ -62,9 +62,9 @@ impl Connection {
         let c = self.db.write().unwrap();
         let r = match callback {
             Some(f) => unsafe {
-                ffi::sqlite3_busy_handler(c.db(), Some(busy_handler_callback), f as *mut c_void)
+                ffi::sqlite3_busy_handler(c.db().to_mut_sqlite_pointer(), Some(busy_handler_callback), f as *mut c_void)
             },
-            None => unsafe { ffi::sqlite3_busy_handler(c.db(), None, ptr::null_mut()) },
+            None => unsafe { ffi::sqlite3_busy_handler(c.db().to_mut_sqlite_pointer(), None, ptr::null_mut()) },
         };
         c.decode_result(r)
     }
@@ -73,7 +73,12 @@ impl Connection {
 impl InnerConnection {
     #[inline]
     fn busy_timeout(&mut self, timeout: c_int) -> Result<()> {
-        let r = unsafe { ffi::sqlite3_busy_timeout(self.db, timeout) };
+        let r = unsafe {
+            let db = self.db.take_mut_sqlite_pointer();
+            let r = ffi::sqlite3_busy_timeout(db, timeout);
+            self.db.set_mut_sqlite_pointer(db);
+            r
+        };
         self.decode_result(r)
     }
 }
