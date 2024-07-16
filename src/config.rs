@@ -3,7 +3,7 @@
 use std::os::raw::c_int;
 
 use crate::error::check;
-use crate::{ffi, IntoSqlitePointer};
+use crate::{ffi, IntoPointer};
 use crate::{Connection, Result};
 
 /// Database Connection Configuration Options
@@ -92,7 +92,7 @@ impl Connection {
         unsafe {
             let mut val = 0;
             check(ffi::sqlite3_db_config(
-                c.db().to_mut_sqlite_pointer(),
+                c.db().to_mut_pointer(),
                 config as c_int,
                 -1,
                 &mut val,
@@ -121,7 +121,7 @@ impl Connection {
         unsafe {
             let mut val = 0;
             check(ffi::sqlite3_db_config(
-                c.db().to_mut_sqlite_pointer(),
+                c.db().to_mut_pointer(),
                 config as c_int,
                 new_val as c_int,
                 &mut val,

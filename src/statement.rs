@@ -2,6 +2,7 @@ use std::os::raw::{c_int, c_void};
 #[cfg(feature = "array")]
 use std::rc::Rc;
 use std::slice::from_raw_parts;
+use std::sync::{Arc, RwLock};
 use std::{fmt, mem, ptr, str};
 
 use super::ffi;
@@ -12,6 +13,7 @@ use super::{
 use crate::types::{ToSql, ToSqlOutput};
 #[cfg(feature = "array")]
 use crate::vtab::array::{free_array, ARRAY_TYPE};
+use crate::{SetPointer, TakePointer};
 
 /// A prepared statement.
 pub struct Statement<'conn> {
@@ -594,7 +596,7 @@ impl Statement<'_> {
     fn bind_parameter<P: ?Sized + ToSql>(&self, param: &P, col: usize) -> Result<()> {
         let value = param.to_sql()?;
 
-        let ptr = unsafe { self.stmt.ptr() };
+        let ptr = self.stmt.ptr().take_mut_pointer();
         let value = match value {
             ToSqlOutput::Borrowed(v) => v,
             ToSqlOutput::Owned(ref v) => ValueRef::from(v),
@@ -626,7 +628,7 @@ impl Statement<'_> {
                 });
             }
         };
-        self.conn.decode_result(match value {
+        let outcome = self.conn.decode_result(match value {
             ValueRef::Null => unsafe { ffi::sqlite3_bind_null(ptr, col as c_int) },
             ValueRef::Integer(i) => unsafe { ffi::sqlite3_bind_int64(ptr, col as c_int, i) },
             ValueRef::Real(r) => unsafe { ffi::sqlite3_bind_double(ptr, col as c_int, r) },
@@ -650,7 +652,9 @@ impl Statement<'_> {
                     )
                 }
             },
-        })
+        });
+        self.stmt.ptr().set_mut_pointer(ptr);
+        outcome
     }
 
     #[inline]
@@ -670,7 +674,7 @@ impl Statement<'_> {
 
     #[inline]
     fn finalize_(&mut self) -> Result<()> {
-        let mut stmt = unsafe { RawStatement::new(ptr::null_mut(), 0) };
+        let mut stmt = unsafe { RawStatement::new(Arc::new(RwLock::new(None)), 0) };
         mem::swap(&mut stmt, &mut self.stmt);
         self.conn.decode_result(stmt.finalize())
     }
@@ -751,7 +755,7 @@ impl Statement<'_> {
     /// this, as it loses our protective `'conn` lifetime bound.
     #[inline]
     pub(crate) unsafe fn into_raw(mut self) -> RawStatement {
-        let mut stmt = RawStatement::new(ptr::null_mut(), 0);
+        let mut stmt = RawStatement::new(Arc::new(RwLock::new(None)), 0);
         mem::swap(&mut stmt, &mut self.stmt);
         stmt
     }
@@ -792,9 +796,9 @@ impl Statement<'_> {
     }
 
     pub(super) fn value_ref(&self, col: usize) -> ValueRef<'_> {
-        let raw = unsafe { self.stmt.ptr() };
+        let raw = self.stmt.ptr().take_mut_pointer();
 
-        match self.stmt.column_type(col) {
+        let outcome = match self.stmt.column_type(col) {
             ffi::SQLITE_NULL => ValueRef::Null,
             ffi::SQLITE_INTEGER => {
                 ValueRef::Integer(unsafe { ffi::sqlite3_column_int64(raw, col as c_int) })
@@ -844,7 +848,9 @@ impl Statement<'_> {
                 }
             }
             _ => unreachable!("sqlite3_column_type returned invalid value"),
-        }
+        };
+        self.stmt.ptr().set_mut_pointer(raw);
+        outcome
     }
 
     #[inline]

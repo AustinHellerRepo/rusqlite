@@ -2,15 +2,18 @@ use super::ffi;
 use super::StatementStatus;
 use crate::util::ParamIndexCache;
 use crate::util::SqliteMallocString;
+use crate::SetPointer;
+use crate::TakePointer;
 use std::ffi::CStr;
 use std::os::raw::c_int;
 use std::ptr;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 // Private newtype for raw sqlite3_stmts that finalize themselves when dropped.
 #[derive(Debug)]
 pub struct RawStatement {
-    ptr: *mut ffi::sqlite3_stmt,
+    ptr: Arc<RwLock<Option<ffi::sqlite3_stmt>>>,
     tail: usize,
     // Cached indices of named parameters, computed on the fly.
     cache: ParamIndexCache,
@@ -29,7 +32,7 @@ pub struct RawStatement {
 
 impl RawStatement {
     #[inline]
-    pub unsafe fn new(stmt: *mut ffi::sqlite3_stmt, tail: usize) -> RawStatement {
+    pub unsafe fn new(stmt: Arc<RwLock<Option<ffi::sqlite3_stmt>>>, tail: usize) -> RawStatement {
         RawStatement {
             ptr: stmt,
             tail,
@@ -38,9 +41,13 @@ impl RawStatement {
         }
     }
 
+    pub fn ptr(&self) -> &Arc<RwLock<Option<ffi::sqlite3_stmt>>> {
+        &self.ptr
+    }
+
     #[inline]
     pub fn is_null(&self) -> bool {
-        self.ptr.is_null()
+        self.ptr.read().unwrap().is_none()
     }
 
     #[inline]
@@ -54,19 +61,22 @@ impl RawStatement {
     }
 
     #[inline]
-    pub unsafe fn ptr(&self) -> *mut ffi::sqlite3_stmt {
-        self.ptr
-    }
-
-    #[inline]
     pub fn column_count(&self) -> usize {
         // Note: Can't cache this as it changes if the schema is altered.
-        unsafe { ffi::sqlite3_column_count(self.ptr) as usize }
+        unsafe {
+            let ptr = self.ptr.take_mut_pointer();
+            let column_count = ffi::sqlite3_column_count(ptr) as usize;
+            self.ptr.set_mut_pointer(ptr);
+            column_count
+        }
     }
 
     #[inline]
     pub fn column_type(&self, idx: usize) -> c_int {
-        unsafe { ffi::sqlite3_column_type(self.ptr, idx as c_int) }
+        let ptr = self.ptr.take_mut_pointer();
+        let outcome = unsafe { ffi::sqlite3_column_type(ptr, idx as c_int) };
+        self.ptr.set_mut_pointer(ptr);
+        outcome
     }
 
     #[inline]
@@ -89,7 +99,9 @@ impl RawStatement {
             return None;
         }
         unsafe {
-            let ptr = ffi::sqlite3_column_name(self.ptr, idx);
+            let statement_instance = self.ptr.take_mut_pointer();
+            let ptr = ffi::sqlite3_column_name(statement_instance, idx);
+            self.ptr.set_mut_pointer(statement_instance);
             // If ptr is null here, it's an OOM, so there's probably nothing
             // meaningful we can do. Just assert instead of returning None.
             assert!(
@@ -103,7 +115,10 @@ impl RawStatement {
     #[inline]
     #[cfg(not(feature = "unlock_notify"))]
     pub fn step(&self) -> c_int {
-        unsafe { ffi::sqlite3_step(self.ptr) }
+        let statement_instance = self.ptr.take_mut_pointer();
+        let outcome = unsafe { ffi::sqlite3_step(statement_instance) };
+        self.ptr.set_mut_pointer(statement_instance);
+        outcome
     }
 
     #[cfg(feature = "unlock_notify")]
@@ -137,18 +152,26 @@ impl RawStatement {
 
     #[inline]
     pub fn reset(&self) -> c_int {
-        unsafe { ffi::sqlite3_reset(self.ptr) }
+        let statement_instance = self.ptr.take_mut_pointer();
+        let outcome = unsafe { ffi::sqlite3_reset(statement_instance) };
+        self.ptr.set_mut_pointer(statement_instance);
+        outcome
     }
 
     #[inline]
     pub fn bind_parameter_count(&self) -> usize {
-        unsafe { ffi::sqlite3_bind_parameter_count(self.ptr) as usize }
+        let statement_instance = self.ptr.take_mut_pointer();
+        let outcome = unsafe { ffi::sqlite3_bind_parameter_count(statement_instance) as usize };
+        self.ptr.set_mut_pointer(statement_instance);
+        outcome
     }
 
     #[inline]
     pub fn bind_parameter_index(&self, name: &str) -> Option<usize> {
         self.cache.get_or_insert_with(name, |param_cstr| {
-            let r = unsafe { ffi::sqlite3_bind_parameter_index(self.ptr, param_cstr.as_ptr()) };
+            let statement_instance = self.ptr.take_mut_pointer();
+            let r = unsafe { ffi::sqlite3_bind_parameter_index(statement_instance, param_cstr.as_ptr()) };
+            self.ptr.set_mut_pointer(statement_instance);
             match r {
                 0 => None,
                 i => Some(i as usize),
@@ -159,7 +182,9 @@ impl RawStatement {
     #[inline]
     pub fn bind_parameter_name(&self, index: i32) -> Option<&CStr> {
         unsafe {
-            let name = ffi::sqlite3_bind_parameter_name(self.ptr, index);
+            let statement_instance = self.ptr.take_mut_pointer();
+            let name = ffi::sqlite3_bind_parameter_name(statement_instance, index);
+            self.ptr.set_mut_pointer(statement_instance);
             if name.is_null() {
                 None
             } else {
@@ -171,17 +196,22 @@ impl RawStatement {
     #[inline]
     pub fn clear_bindings(&mut self) {
         unsafe {
-            ffi::sqlite3_clear_bindings(self.ptr);
+            let statement_instance = self.ptr.take_mut_pointer();
+            ffi::sqlite3_clear_bindings(statement_instance);
+            self.ptr.set_mut_pointer(statement_instance);
         } // rc is always SQLITE_OK
     }
 
     #[inline]
     pub fn sql(&self) -> Option<&CStr> {
-        if self.ptr.is_null() {
+        let statement_instance = self.ptr.take_mut_pointer();
+        let outcome = if statement_instance.is_null() {
             None
         } else {
-            Some(unsafe { CStr::from_ptr(ffi::sqlite3_sql(self.ptr)) })
-        }
+            Some(unsafe { CStr::from_ptr(ffi::sqlite3_sql(statement_instance)) })
+        };
+        self.ptr.set_mut_pointer(statement_instance);
+        outcome
     }
 
     #[inline]
@@ -191,26 +221,37 @@ impl RawStatement {
 
     #[inline]
     fn finalize_(&mut self) -> c_int {
-        let r = unsafe { ffi::sqlite3_finalize(self.ptr) };
-        self.ptr = ptr::null_mut();
+        let statement_instance = self.ptr.take_mut_pointer();
+        let r = unsafe {
+            ffi::sqlite3_finalize(statement_instance)
+        };
         r
     }
 
     // does not work for PRAGMA
     #[inline]
     pub fn readonly(&self) -> bool {
-        unsafe { ffi::sqlite3_stmt_readonly(self.ptr) != 0 }
+        let statement_instance = self.ptr.take_mut_pointer();
+        let outcome = unsafe { ffi::sqlite3_stmt_readonly(statement_instance) != 0 };
+        self.ptr.set_mut_pointer(statement_instance);
+        outcome
     }
 
     #[inline]
     pub(crate) fn expanded_sql(&self) -> Option<SqliteMallocString> {
-        unsafe { SqliteMallocString::from_raw(ffi::sqlite3_expanded_sql(self.ptr)) }
+        let statement_instance = self.ptr.take_mut_pointer();
+        let outcome = unsafe { SqliteMallocString::from_raw(ffi::sqlite3_expanded_sql(statement_instance)) };
+        self.ptr.set_mut_pointer(statement_instance);
+        outcome
     }
 
     #[inline]
     pub fn get_status(&self, status: StatementStatus, reset: bool) -> i32 {
-        assert!(!self.ptr.is_null());
-        unsafe { ffi::sqlite3_stmt_status(self.ptr, status as i32, reset as i32) }
+        let statement_instance = self.ptr.take_mut_pointer();
+        assert!(!statement_instance.is_null());
+        let outcome = unsafe { ffi::sqlite3_stmt_status(statement_instance, status as i32, reset as i32) };
+        self.ptr.set_mut_pointer(statement_instance);
+        outcome
     }
 
     #[inline]

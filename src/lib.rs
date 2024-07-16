@@ -266,24 +266,24 @@ macro_rules! prepare_cached_and_bind {
     }};
 }
 
-pub trait IntoSqlitePointer {
-    fn to_mut_sqlite_pointer(self) -> *mut ffi::sqlite3;
+pub trait IntoPointer<T> {
+    fn to_mut_pointer(self) -> *mut T;
 }
 
-pub trait FromSqlitePointer {
-    fn from_mut_sqlite_pointer(self) -> Arc<RwLock<Option<ffi::sqlite3>>>;
+pub trait FromPointer<T> {
+    fn from_mut_pointer(self) -> Arc<RwLock<Option<T>>>;
 }
 
-pub trait TakeSqlitePointer {
-    fn take_mut_sqlite_pointer(&self) -> *mut ffi::sqlite3;
+pub trait TakePointer<T> {
+    fn take_mut_pointer(&self) -> *mut T;
 }
 
-pub trait SetSqlitePointer {
-    fn set_mut_sqlite_pointer(&self, sqlite_instance: *mut ffi::sqlite3) -> ();
+pub trait SetPointer<T> {
+    fn set_mut_pointer(&self, pointer: *mut T) -> ();
 }
 
-impl IntoSqlitePointer for Arc<RwLock<Option<ffi::sqlite3>>> {
-    fn to_mut_sqlite_pointer(self) -> *mut ffi::sqlite3 {
+impl<T> IntoPointer<T> for Arc<RwLock<Option<T>>> {
+    fn to_mut_pointer(self) -> *mut T {
         let mut sqlite_instance = Arc::try_unwrap(self)
             .ok()
             .unwrap()
@@ -297,10 +297,10 @@ impl IntoSqlitePointer for Arc<RwLock<Option<ffi::sqlite3>>> {
     }
 }
 
-impl FromSqlitePointer for *mut ffi::sqlite3 {
-    fn from_mut_sqlite_pointer(self) -> Arc<RwLock<Option<libsqlite3_sys::sqlite3>>> {
+impl<T> FromPointer<T> for *mut T {
+    fn from_mut_pointer(self) -> Arc<RwLock<Option<T>>> {
         unsafe {
-            let sqlite_instance: Option<ffi::sqlite3> = if self.is_null() {
+            let sqlite_instance: Option<T> = if self.is_null() {
                 None
             } else {
                 Some(*Box::from_raw(self))
@@ -310,8 +310,8 @@ impl FromSqlitePointer for *mut ffi::sqlite3 {
     }
 }
 
-impl TakeSqlitePointer for Arc<RwLock<Option<ffi::sqlite3>>> {
-    fn take_mut_sqlite_pointer(&self) -> *mut libsqlite3_sys::sqlite3 {
+impl<T> TakePointer<T> for Arc<RwLock<Option<T>>> {
+    fn take_mut_pointer(&self) -> *mut T {
         let mut sqlite_instance = self.write()
             .unwrap()
             .take();
@@ -323,8 +323,8 @@ impl TakeSqlitePointer for Arc<RwLock<Option<ffi::sqlite3>>> {
     }
 }
 
-impl SetSqlitePointer for Arc<RwLock<Option<ffi::sqlite3>>> {
-    fn set_mut_sqlite_pointer(&self, sqlite_instance: *mut ffi::sqlite3) -> () {
+impl<T> SetPointer<T> for Arc<RwLock<Option<T>>> {
+    fn set_mut_pointer(&self, sqlite_instance: *mut T) -> () {
         unsafe {
             *self.write()
                 .unwrap() = Some(*Box::from_raw(sqlite_instance));
@@ -697,14 +697,17 @@ impl Connection {
     #[inline]
     pub fn path(&self) -> Option<&str> {
         unsafe {
-            let db = self.handle();
+            let locked_db = self.db.write().unwrap();
+            let db = locked_db.db.take_mut_pointer();
             let db_name = DatabaseName::Main.as_cstring().unwrap();
             let db_filename = ffi::sqlite3_db_filename(db, db_name.as_ptr());
-            if db_filename.is_null() {
+            let path = if db_filename.is_null() {
                 None
             } else {
                 CStr::from_ptr(db_filename).to_str().ok()
-            }
+            };
+            locked_db.db.set_mut_pointer(db);
+            path
         }
     }
 
@@ -982,24 +985,6 @@ impl Connection {
             .load_extension(dylib_path.as_ref(), entry_point)
     }
 
-    /// Get access to the underlying SQLite database connection handle.
-    ///
-    /// # Warning
-    ///
-    /// You should not need to use this function. If you do need to, please
-    /// [open an issue on the rusqlite repository](https://github.com/rusqlite/rusqlite/issues) and describe
-    /// your use case.
-    ///
-    /// # Safety
-    ///
-    /// This function is unsafe because it gives you raw access
-    /// to the SQLite connection, and what you do with it could impact the
-    /// safety of this `Connection`.
-    #[inline]
-    pub unsafe fn handle(&self) -> *mut ffi::sqlite3 {
-        self.db.read().unwrap().db().to_mut_sqlite_pointer()
-    }
-
     /// Create a `Connection` from a raw handle.
     ///
     /// The underlying SQLite database connection handle will not be closed when
@@ -1010,7 +995,7 @@ impl Connection {
     /// This function is unsafe because improper use may impact the Connection.
     #[inline]
     pub unsafe fn from_handle(db: *mut ffi::sqlite3) -> Result<Connection> {
-        let db = InnerConnection::new(db.from_mut_sqlite_pointer(), false);
+        let db = InnerConnection::new(db.from_mut_pointer(), false);
         Ok(Connection {
             db: Arc::new(RwLock::new(db)),
             cache: StatementCache::with_capacity(STATEMENT_CACHE_DEFAULT_CAPACITY),
@@ -1058,7 +1043,7 @@ impl Connection {
     /// `ffi::sqlite3_open`().
     #[inline]
     pub unsafe fn from_handle_owned(db: *mut ffi::sqlite3) -> Result<Connection> {
-        let db = InnerConnection::new(db.from_mut_sqlite_pointer(), true);
+        let db = InnerConnection::new(db.from_mut_pointer(), true);
         Ok(Connection {
             db: Arc::new(RwLock::new(db)),
             cache: StatementCache::with_capacity(STATEMENT_CACHE_DEFAULT_CAPACITY),
@@ -1507,7 +1492,8 @@ mod test {
             use std::os::raw::c_int;
             use std::ptr;
 
-            let raw_db = db.db.write().unwrap().db.take_mut_sqlite_pointer();
+            let locked_db = db.db.write().unwrap();
+            let raw_db = locked_db.db.take_mut_pointer();
             let sql = "SELECT 1";
             let mut raw_stmt: *mut ffi::sqlite3_stmt = ptr::null_mut();
             let cstring = str_to_cstring(sql)?;
@@ -1521,6 +1507,7 @@ mod test {
                 )
             };
             assert_eq!(rc, ffi::SQLITE_OK);
+            locked_db.db.set_mut_pointer(raw_db);
             raw_stmt
         };
 
@@ -1956,10 +1943,14 @@ mod test {
     #[test]
     fn test_from_handle() -> Result<()> {
         let db = Connection::open_in_memory()?;
-        let handle = unsafe { db.handle() };
         {
-            let db = unsafe { Connection::from_handle(handle) }?;
-            db.execute_batch("PRAGMA VACUUM")?;
+            let locked_db = db.db.write().unwrap();
+            let handle = locked_db.db.take_mut_pointer();
+            {
+                let db = unsafe { Connection::from_handle(handle) }?;
+                db.execute_batch("PRAGMA VACUUM")?;
+            }
+            locked_db.db.set_mut_pointer(handle);
         }
         db.close().unwrap();
         Ok(())
